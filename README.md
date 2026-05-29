@@ -8,6 +8,72 @@ This fork adds FP16-focused extensions for workloads that need lower memory use 
 
 The FP16 work is maintained separately from upstream `tiny-cuda-nn` so experimental kernels and precision tradeoffs can evolve without changing the upstream-compatible `main` workflow.
 
+### FP16 usage examples
+
+With the PyTorch bindings, request FP16 parameters and outputs by passing `dtype=torch.float16` when constructing the module. Inputs remain `torch.float32`, matching the tiny-cuda-nn mixed-precision path; cast outputs to float if the surrounding loss or model expects FP32 math.
+
+```python
+import torch
+import tinycudann as tcnn
+
+model = tcnn.NetworkWithInputEncoding(
+    n_input_dims=3,
+    n_output_dims=1,
+    encoding_config={
+        "otype": "HashGrid",
+        "n_levels": 16,
+        "n_features_per_level": 2,
+        "log2_hashmap_size": 19,
+        "base_resolution": 16,
+        "per_level_scale": 2.0,
+    },
+    network_config={
+        "otype": "FullyFusedMLP",
+        "activation": "ReLU",
+        "output_activation": "None",
+        "n_neurons": 64,
+        "n_hidden_layers": 2,
+    },
+    dtype=torch.float16,
+)
+
+x = torch.rand(65536, 3, device="cuda", dtype=torch.float32)
+y = model(x)
+print(y.dtype)  # torch.float16
+
+loss = torch.nn.functional.mse_loss(y.float(), torch.zeros_like(y, dtype=torch.float32))
+loss.backward()
+```
+
+With the C++ runtime API, request FP16 explicitly through `tcnn::cpp::Precision::Fp16`:
+
+```cpp
+#include <tiny-cuda-nn/cpp_api.h>
+
+using json = nlohmann::json;
+
+json encoding = {
+    {"otype", "HashGrid"},
+    {"n_levels", 16},
+    {"n_features_per_level", 2},
+    {"log2_hashmap_size", 19},
+    {"base_resolution", 16},
+    {"per_level_scale", 2.0},
+};
+
+json network = {
+    {"otype", "FullyFusedMLP"},
+    {"activation", "ReLU"},
+    {"output_activation", "None"},
+    {"n_neurons", 64},
+    {"n_hidden_layers", 2},
+};
+
+auto* model = tcnn::cpp::create_network_with_input_encoding(
+    3, 1, encoding, network, tcnn::cpp::Precision::Fp16
+);
+```
+
 ## Performance
 
 ![Image](data/readme/fully-fused-vs-tensorflow.png)
