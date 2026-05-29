@@ -8,7 +8,7 @@ import shutil
 import sys
 import torch
 from glob import glob
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 ROOT_DIR = os.path.dirname(os.path.dirname(SCRIPT_DIR))
@@ -30,6 +30,22 @@ def max_supported_compute_capability(cuda_version):
 		return 90
 	else:
 		return 120
+
+def find_nvcc():
+	nvcc_path = shutil.which("nvcc")
+	if nvcc_path is not None:
+		return nvcc_path
+
+	cuda_homes = [CUDA_HOME, os.environ.get("CUDA_HOME"), os.environ.get("CUDA_PATH"), "/usr/local/cuda"]
+	for cuda_home in cuda_homes:
+		if not cuda_home:
+			continue
+
+		nvcc_path = os.path.join(cuda_home, "bin", "nvcc")
+		if os.path.isfile(nvcc_path):
+			return nvcc_path
+
+	return None
 
 # Find version of tinycudann by scraping CMakeLists.txt
 with open(os.path.join(ROOT_DIR, "CMakeLists.txt"), "r") as cmakelists:
@@ -81,9 +97,11 @@ if os.name == "nt":
 
 cpp_standard = 14
 
+nvcc_path = find_nvcc()
+
 # Get CUDA version and make sure the targeted compute capability is compatible
-if os.system("nvcc --version") == 0:
-	nvcc_out = subprocess.check_output(["nvcc", "--version"]).decode()
+if nvcc_path is not None:
+	nvcc_out = subprocess.check_output([nvcc_path, "--version"]).decode()
 	cuda_version = re.search(r"release (\S+),", nvcc_out)
 
 	if cuda_version:
@@ -117,6 +135,9 @@ base_nvcc_flags = [
 	"-U__CUDA_NO_HALF_OPERATORS__",
 	"-U__CUDA_NO_HALF_CONVERSIONS__",
 	"-U__CUDA_NO_HALF2_OPERATORS__",
+	"-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+	"-U__CUDA_NO_BFLOAT16_OPERATORS__",
+	"-U__CUDA_NO_BFLOAT162_OPERATORS__",
 ]
 
 if os.name == "posix":
@@ -171,13 +192,12 @@ shutil.rmtree(rtc_dir, ignore_errors=True)
 os.makedirs(rtc_include_dir, exist_ok=True)
 os.makedirs(rtc_cache_dir, exist_ok=True)
 
-nvcc_path = shutil.which("nvcc")
 if nvcc_path is None:
 	print(f"WARNING: could not find CUDA include directory. JIT compilation will not be supported.")
 else:
 	cuda_include_dir = os.path.join(os.path.dirname(os.path.dirname(nvcc_path)), "include")
 
-	cuda_headers = glob(f"{cuda_include_dir}/cuda_fp16*") + glob(f"{cuda_include_dir}/vector*")
+	cuda_headers = glob(f"{cuda_include_dir}/cuda_fp16*") + glob(f"{cuda_include_dir}/cuda_bf16*") + glob(f"{cuda_include_dir}/vector*")
 	tcnn_headers = glob(f"{root_dir}/include/tiny-cuda-nn/*", recursive=True)
 	pcg32_headers = glob(f"{root_dir}/dependencies/pcg32/*")
 
@@ -253,7 +273,7 @@ setup(
 	maintainer_email="tmueller@nvidia.com",
 	download_url=f"https://github.com/nvlabs/tiny-cuda-nn",
 	license="BSD 3-Clause \"New\" or \"Revised\" License",
-	packages=["tinycudann"],
+	packages=["tinycudann", "tinycudann_bindings"],
 	package_data={"": package_files(rtc_dir)},
 	install_requires=[],
 	include_package_data=True,

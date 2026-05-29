@@ -215,6 +215,15 @@ inline TCNN_DEVICE __half fma(__half a, __half b, __half c) {
 	return fmaf(a, b, c);
 #endif
 }
+#if TCNN_HAS_CUDA_BF16
+inline TCNN_DEVICE __nv_bfloat16 fma(__nv_bfloat16 a, __nv_bfloat16 b, __nv_bfloat16 c) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+	return __hfma(a, b, c);
+#else
+	return (__nv_bfloat16)fmaf(__bfloat162float(a), __bfloat162float(b), __bfloat162float(c));
+#endif
+}
+#endif
 #endif
 
 #define TVEC tvec<T, N, A>
@@ -347,6 +356,31 @@ TCNN_DEVICE void atomic_add_gmem(__half* dst, const tvec<__half, N, A>& a) {
 	TCNN_PRAGMA_UNROLL
 	for (uint32_t i = 0; i < N; i += 2) {
 		atomic_add_gmem_h2((__half2*)(dst + i), __half2(a[i], a[i+1]));
+	}
+}
+#endif
+#if TCNN_HAS_CUDA_BF16 && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+template <uint32_t N, size_t A, typename = std::enable_if_t<N % 2 == 0>>
+TCNN_DEVICE void atomic_add(__nv_bfloat16* dst, const tvec<__nv_bfloat16, N, A>& a) {
+	TCNN_PRAGMA_UNROLL
+	for (uint32_t i = 0; i < N; i += 2) {
+		atomicAdd((__nv_bfloat162*)(dst + i), make_bfloat162(a[i], a[i+1]));
+	}
+}
+
+template <uint32_t N, size_t A, typename = std::enable_if_t<N % 2 == 0>>
+TCNN_DEVICE void atomic_add_gmem(__nv_bfloat16* dst, const tvec<__nv_bfloat16, N, A>& a) {
+	TCNN_PRAGMA_UNROLL
+	for (uint32_t i = 0; i < N; i += 2) {
+		atomicAdd((__nv_bfloat162*)(dst + i), make_bfloat162(a[i], a[i+1]));
+	}
+}
+
+template <uint32_t N, size_t A, typename = std::enable_if_t<N % 2 != 0>, typename = void>
+TCNN_DEVICE void atomic_add_gmem(__nv_bfloat16* dst, const tvec<__nv_bfloat16, N, A>& a) {
+	TCNN_PRAGMA_UNROLL
+	for (uint32_t i = 0; i < N; ++i) {
+		atomicAdd(dst + i, a[i]);
 	}
 }
 #endif

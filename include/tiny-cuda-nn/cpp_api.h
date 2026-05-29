@@ -71,6 +71,7 @@ bool has_networks();
 enum class Precision {
 	Fp32,
 	Fp16,
+	Bf16,
 };
 
 float default_loss_scale(Precision p);
@@ -119,7 +120,9 @@ private:
 };
 
 Module* create_network_with_input_encoding(uint32_t n_input_dims, uint32_t n_output_dims, const json& encoding, const json& network);
+Module* create_network_with_input_encoding(uint32_t n_input_dims, uint32_t n_output_dims, const json& encoding, const json& network, Precision requested_precision);
 Module* create_network(uint32_t n_input_dims, uint32_t n_output_dims, const json& network);
+Module* create_network(uint32_t n_input_dims, uint32_t n_output_dims, const json& network, Precision requested_precision);
 Module* create_encoding(uint32_t n_input_dims, const json& encoding, Precision requested_precision);
 
 }}

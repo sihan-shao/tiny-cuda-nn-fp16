@@ -344,7 +344,7 @@ if (TCNN_BUILD_WITH_RTC)
 		set(CUDA_INCLUDE "${CUDA_DIR}/include")
 	endif()
 
-	file(GLOB CUDA_HEADERS "${CUDA_INCLUDE}/cuda_fp16*" "${CUDA_INCLUDE}/vector*")
+	file(GLOB CUDA_HEADERS "${CUDA_INCLUDE}/cuda_fp16*" "${CUDA_INCLUDE}/cuda_bf16*" "${CUDA_INCLUDE}/vector*")
 	if (NOT CUDA_HEADERS)
 		message(WARNING "FP16 headers could not be found. JIT compilation will likely fail.")
 	endif()

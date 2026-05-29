@@ -58,6 +58,7 @@ c10::ScalarType torch_type(tcnn::cpp::Precision precision) {
 	switch (precision) {
 		case tcnn::cpp::Precision::Fp32: return torch::kFloat32;
 		case tcnn::cpp::Precision::Fp16: return torch::kHalf;
+		case tcnn::cpp::Precision::Bf16: return torch::kBFloat16;
 		default: throw std::runtime_error{"Unknown precision tcnn->torch"};
 	}
 }
@@ -66,6 +67,7 @@ void* void_data_ptr(torch::Tensor& tensor) {
 	switch (tensor.scalar_type()) {
 		case torch::kFloat32: return tensor.data_ptr<float>();
 		case torch::kHalf: return tensor.data_ptr<torch::Half>();
+		case torch::kBFloat16: return tensor.data_ptr<c10::BFloat16>();
 		default: throw std::runtime_error{"Unknown precision torch->void"};
 	}
 }
@@ -268,12 +270,12 @@ private:
 };
 
 #if !defined(TCNN_NO_NETWORKS)
-Module create_network_with_input_encoding(uint32_t n_input_dims, uint32_t n_output_dims, const nlohmann::json& encoding, const nlohmann::json& network) {
-	return Module{tcnn::cpp::create_network_with_input_encoding(n_input_dims, n_output_dims, encoding, network)};
+Module create_network_with_input_encoding(uint32_t n_input_dims, uint32_t n_output_dims, const nlohmann::json& encoding, const nlohmann::json& network, tcnn::cpp::Precision requested_precision) {
+	return Module{tcnn::cpp::create_network_with_input_encoding(n_input_dims, n_output_dims, encoding, network, requested_precision)};
 }
 
-Module create_network(uint32_t n_input_dims, uint32_t n_output_dims, const nlohmann::json& network) {
-	return Module{tcnn::cpp::create_network(n_input_dims, n_output_dims, network)};
+Module create_network(uint32_t n_input_dims, uint32_t n_output_dims, const nlohmann::json& network, tcnn::cpp::Precision requested_precision) {
+	return Module{tcnn::cpp::create_network(n_input_dims, n_output_dims, network, requested_precision)};
 }
 #endif
 
@@ -294,6 +296,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 	py::enum_<tcnn::cpp::Precision>(m, "Precision")
 		.value("Fp32", tcnn::cpp::Precision::Fp32)
 		.value("Fp16", tcnn::cpp::Precision::Fp16)
+		.value("Bf16", tcnn::cpp::Precision::Bf16)
 		.export_values()
 		;
 

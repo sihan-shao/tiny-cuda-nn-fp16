@@ -40,6 +40,16 @@
 
 #if defined(__CUDACC__)
 #  include <cuda_fp16.h>
+#  if defined(__has_include)
+#    if __has_include(<cuda_bf16.h>)
+#      include <cuda_bf16.h>
+#      define TCNN_HAS_CUDA_BF16 1
+#    endif
+#  endif
+#endif
+
+#ifndef TCNN_HAS_CUDA_BF16
+#  define TCNN_HAS_CUDA_BF16 0
 #endif
 
 //////////////////////////////////////
@@ -238,6 +248,9 @@ template <typename T> constexpr TCNN_HOST_DEVICE float default_loss_scale();
 template <> constexpr TCNN_HOST_DEVICE float default_loss_scale<float>() { return 1.0f; }
 #ifdef __CUDACC__
 template <> constexpr TCNN_HOST_DEVICE float default_loss_scale<__half>() { return 128.0f; }
+#  if TCNN_HAS_CUDA_BF16
+template <> constexpr TCNN_HOST_DEVICE float default_loss_scale<__nv_bfloat16>() { return 128.0f; }
+#  endif
 #endif
 
 constexpr uint32_t BATCH_SIZE_GRANULARITY = 256;

@@ -30,9 +30,42 @@
 #include "test_common.h"
 
 #include <tiny-cuda-nn/encoding.h>
+#include <tiny-cuda-nn/encodings/grid.h>
 #include <tiny-cuda-nn/encodings/multi_level_interface.h>
 
+#include <cmath>
+#include <vector>
+
 using namespace tcnn;
+
+#if TCNN_HAS_CUDA_BF16 && TCNN_MIN_GPU_ARCH >= 80
+__global__ void fill_bf16_grid_test(uint32_t n, __nv_bfloat16* data, float value) {
+	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
+	if (i < n) {
+		data[i] = (__nv_bfloat16)value;
+	}
+}
+
+__global__ void fill_bf16_grid_test_sequence(uint32_t n, __nv_bfloat16* data) {
+	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
+	if (i < n) {
+		data[i] = (__nv_bfloat16)(0.01f + 0.001f * (float)(i % 17));
+	}
+}
+
+bool has_only_finite_values_and_any_nonzero_grid_test(const std::vector<__nv_bfloat16>& values) {
+	bool any_nonzero = false;
+	for (const auto value : values) {
+		const float v = __bfloat162float(value);
+		if (!std::isfinite(v)) {
+			return false;
+		}
+		any_nonzero |= std::abs(v) > 0.0f;
+	}
+
+	return any_nonzero;
+}
+#endif
 
 TEST_CASE("GridEncoding sanity checks", "[encoding]") {
 	tcnn_test_setup();
@@ -47,7 +80,7 @@ TEST_CASE("GridEncoding sanity checks", "[encoding]") {
 		"per_level_scale": 1.5
 	})";
 	nlohmann::json config_json = nlohmann::json::parse(config);
-	std::unique_ptr<MultiLevelEncoding<float>> g{dynamic_cast<MultiLevelEncoding<float>*>(create_encoding<float>(3, config_json))};
+	std::unique_ptr<MultiLevelEncoding<float>> g{create_grid_encoding<float>(3, config_json)};
 
 	REQUIRE(g);
 
@@ -89,4 +122,85 @@ TEST_CASE("GridEncoding sanity checks", "[encoding]") {
 
 	std::vector<float> result_host(output.n_elements());
 	CUDA_CHECK_THROW(cudaMemcpy(result_host.data(), output.data(), output.n_bytes(), cudaMemcpyDeviceToHost));
+}
+
+
+TEST_CASE("GridEncoding supports bf16 forward and backward", "[encoding][bf16]") {
+#if TCNN_HAS_CUDA_BF16 && TCNN_MIN_GPU_ARCH >= 80
+	using T = __nv_bfloat16;
+
+	int n_devices = 0;
+	CUDA_CHECK_THROW(cudaGetDeviceCount(&n_devices));
+	int bf16_device = -1;
+	for (int i = 0; i < n_devices; ++i) {
+		cudaDeviceProp props;
+		CUDA_CHECK_THROW(cudaGetDeviceProperties(&props, i));
+		if (props.major * 10 + props.minor == TCNN_MIN_GPU_ARCH && props.major >= 8) {
+			bf16_device = i;
+			break;
+		}
+	}
+
+	if (bf16_device < 0) {
+		SUCCEED("No CUDA device matching TCNN_MIN_GPU_ARCH is available for bf16 grid encoding.");
+		return;
+	}
+
+	CUDA_CHECK_THROW(cudaSetDevice(bf16_device));
+	tcnn_test_setup();
+
+	nlohmann::json config_json = nlohmann::json::parse(R"({
+		"otype": "HashGrid",
+		"base_resolution": 4,
+		"log2_hashmap_size": 4,
+		"n_features_per_level": 2,
+		"n_levels": 2,
+		"per_level_scale": 2.0,
+		"interpolation": "Linear"
+	})");
+
+	std::unique_ptr<MultiLevelEncoding<T>> g{create_grid_encoding<T>(3, config_json)};
+	REQUIRE(g);
+
+	GPUMemory<T> params{g->n_params()};
+	GPUMemory<T> gradients{g->n_params()};
+	fill_bf16_grid_test_sequence<<<n_blocks_linear(params.size()), N_THREADS_LINEAR>>>((uint32_t)params.size(), params.data());
+	CUDA_CHECK_THROW(cudaMemset(gradients.data(), 0, gradients.get_bytes()));
+	CUDA_CHECK_THROW(cudaGetLastError());
+	g->set_params(params.data(), params.data(), gradients.data());
+
+	const uint32_t batch_size = BATCH_SIZE_GRANULARITY;
+	GPUMatrix<float> input{g->n_pos_dims(), batch_size};
+	GPUMatrix<T> output{g->padded_output_width(), batch_size};
+	GPUMatrix<T> output_gradient{g->padded_output_width(), batch_size};
+	GPUMatrix<float> input_gradient{g->n_pos_dims(), batch_size};
+
+	input.memset(0);
+	fill_bf16_grid_test<<<n_blocks_linear(output_gradient.n_elements()), N_THREADS_LINEAR>>>(
+		output_gradient.n_elements(),
+		output_gradient.data(),
+		1.0f
+	);
+	CUDA_CHECK_THROW(cudaMemset(output.data(), 0, output.n_bytes()));
+	CUDA_CHECK_THROW(cudaMemset(input_gradient.data(), 0, input_gradient.n_bytes()));
+	CUDA_CHECK_THROW(cudaGetLastError());
+
+	std::unique_ptr<Context> ctx;
+	REQUIRE_NOTHROW(ctx = g->forward(input, &output, false, true));
+	CUDA_CHECK_THROW(cudaDeviceSynchronize());
+	REQUIRE(has_only_finite_values_and_any_nonzero_grid_test(output.to_cpu_vector()));
+
+#if defined(TCNN_RTC)
+	REQUIRE_NOTHROW(g->backward(*ctx, input, output, output_gradient, &input_gradient, false, GradientMode::Overwrite));
+#else
+	REQUIRE_NOTHROW(g->backward_impl(nullptr, *ctx, input, output, output_gradient, &input_gradient, false, GradientMode::Overwrite));
+#endif
+	CUDA_CHECK_THROW(cudaDeviceSynchronize());
+	std::vector<T> gradient_values(g->n_params());
+	gradients.copy_to_host(gradient_values);
+	REQUIRE(has_only_finite_values_and_any_nonzero_grid_test(gradient_values));
+
+#else
+	SUCCEED("bf16 grid encoding requires CUDA bf16 support and TCNN_MIN_GPU_ARCH >= 80.");
+#endif
 }

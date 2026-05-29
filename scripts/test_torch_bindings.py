@@ -47,4 +47,134 @@ y = net(x)
 y2 = net(x2)
 (y + y2).sum().backward() # RuntimeError: Must call forward() before calling backward()
 
+
+
+if torch.cuda.get_device_capability()[0] >= 8:
+	bf16_model = tcnn.NetworkWithInputEncoding(
+		n_input_dims=3,
+		n_output_dims=4,
+		encoding_config={
+			"otype": "HashGrid",
+			"base_resolution": 4,
+			"log2_hashmap_size": 4,
+			"n_features_per_level": 2,
+			"n_levels": 2,
+			"per_level_scale": 2.0,
+			"interpolation": "Linear",
+		},
+		network_config={
+			"otype": "FullyFusedMLP",
+			"activation": "ReLU",
+			"output_activation": "None",
+			"n_neurons": 16,
+			"n_hidden_layers": 2,
+		},
+		dtype=torch.bfloat16,
+	).cuda()
+	bf16_model.jit_fusion = False
+	assert bf16_model.dtype == torch.bfloat16
+
+	bf16_x = torch.rand(256, 3, device='cuda', requires_grad=True)
+	bf16_y = bf16_model(bf16_x)
+	assert bf16_y.dtype == torch.bfloat16
+	bf16_y.float().square().mean().backward()
+	assert bf16_x.grad is not None
+	assert bf16_model.params.grad is not None
+
+	bf16_jit_model = tcnn.NetworkWithInputEncoding(
+		n_input_dims=3,
+		n_output_dims=4,
+		encoding_config={
+			"otype": "HashGrid",
+			"base_resolution": 4,
+			"log2_hashmap_size": 4,
+			"n_features_per_level": 2,
+			"n_levels": 2,
+			"per_level_scale": 2.0,
+			"interpolation": "Linear",
+		},
+		network_config={
+			"otype": "FullyFusedMLP",
+			"activation": "ReLU",
+			"output_activation": "None",
+			"n_neurons": 16,
+			"n_hidden_layers": 2,
+		},
+		dtype=torch.bfloat16,
+	).cuda()
+	bf16_jit_model.jit_fusion = True
+	with torch.no_grad():
+		bf16_jit_model.params.copy_(bf16_model.params.detach())
+	bf16_model.zero_grad(set_to_none=True)
+	bf16_jit_model.zero_grad(set_to_none=True)
+
+	bf16_compare_x = torch.rand(256, 3, device='cuda')
+	bf16_ref_x = bf16_compare_x.detach().clone().requires_grad_(True)
+	bf16_jit_x = bf16_compare_x.detach().clone().requires_grad_(True)
+	bf16_ref_y = bf16_model(bf16_ref_x)
+	bf16_jit_y = bf16_jit_model(bf16_jit_x)
+	assert bf16_jit_y.dtype == torch.bfloat16
+	torch.testing.assert_close(bf16_jit_y.float(), bf16_ref_y.float(), rtol=1e-2, atol=1e-2)
+	bf16_ref_y.float().square().mean().backward()
+	bf16_jit_y.float().square().mean().backward()
+	assert bf16_jit_x.grad is not None
+	assert bf16_jit_model.params.grad is not None
+	torch.testing.assert_close(bf16_jit_x.grad, bf16_ref_x.grad, rtol=1e-2, atol=1e-5)
+	torch.testing.assert_close(bf16_jit_model.params.grad.float(), bf16_model.params.grad.float(), rtol=1e-2, atol=1e-5)
+	assert bf16_jit_model.jit_fusion
+
+	bf16_zero_hidden_config = {
+		"otype": "CutlassMLP",
+		"activation": "ReLU",
+		"output_activation": "None",
+		"n_neurons": 16,
+		"n_hidden_layers": 0,
+	}
+	bf16_zero_ref = tcnn.NetworkWithInputEncoding(
+		n_input_dims=3,
+		n_output_dims=4,
+		encoding_config={
+			"otype": "HashGrid",
+			"base_resolution": 4,
+			"log2_hashmap_size": 4,
+			"n_features_per_level": 2,
+			"n_levels": 2,
+			"per_level_scale": 2.0,
+			"interpolation": "Linear",
+		},
+		network_config=bf16_zero_hidden_config,
+		dtype=torch.bfloat16,
+	).cuda()
+	bf16_zero_ref.jit_fusion = False
+	bf16_zero_jit = tcnn.NetworkWithInputEncoding(
+		n_input_dims=3,
+		n_output_dims=4,
+		encoding_config={
+			"otype": "HashGrid",
+			"base_resolution": 4,
+			"log2_hashmap_size": 4,
+			"n_features_per_level": 2,
+			"n_levels": 2,
+			"per_level_scale": 2.0,
+			"interpolation": "Linear",
+		},
+		network_config=bf16_zero_hidden_config,
+		dtype=torch.bfloat16,
+	).cuda()
+	bf16_zero_jit.jit_fusion = True
+	with torch.no_grad():
+		bf16_zero_jit.params.copy_(bf16_zero_ref.params.detach())
+
+	bf16_zero_x = torch.rand(128, 3, device='cuda')
+	bf16_zero_ref_x = bf16_zero_x.detach().clone().requires_grad_(True)
+	bf16_zero_jit_x = bf16_zero_x.detach().clone().requires_grad_(True)
+	bf16_zero_ref_y = bf16_zero_ref(bf16_zero_ref_x)
+	bf16_zero_jit_y = bf16_zero_jit(bf16_zero_jit_x)
+	torch.testing.assert_close(bf16_zero_jit_y.float(), bf16_zero_ref_y.float(), rtol=1e-2, atol=1e-2)
+	bf16_zero_ref_y.float().square().mean().backward()
+	bf16_zero_jit_y.float().square().mean().backward()
+	torch.testing.assert_close(bf16_zero_jit_x.grad, bf16_zero_ref_x.grad, rtol=1e-2, atol=1e-5)
+	torch.testing.assert_close(bf16_zero_jit.params.grad.float(), bf16_zero_ref.params.grad.float(), rtol=1e-2, atol=1e-5)
+	assert bf16_zero_jit.jit_fusion
+
 print("success!")

@@ -372,7 +372,15 @@ void CutlassMLP<T>::initialize_params(pcg32& rnd, float* params_full_precision, 
 	}
 }
 
-// Explicitly instantiate CutlassMLP classes.
-template class CutlassMLP<network_precision_t>;
+// Explicitly instantiate CutlassMLP classes used by the runtime precision factories.
+#if !TCNN_HALF_PRECISION
+template class CutlassMLP<float>;
+#endif
+#if TCNN_HALF_PRECISION
+template class CutlassMLP<__half>;
+#endif
+#if TCNN_HAS_CUDA_BF16 && TCNN_MIN_GPU_ARCH >= 80
+template class CutlassMLP<__nv_bfloat16>;
+#endif
 
 }

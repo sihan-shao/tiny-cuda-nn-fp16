@@ -87,8 +87,22 @@ def _torch_precision(tcnn_precision):
 		return torch.half
 	elif tcnn_precision == _C.Precision.Fp32:
 		return torch.float
+	elif tcnn_precision == _C.Precision.Bf16:
+		return torch.bfloat16
 	else:
 		raise ValueError(f"Unknown precision {tcnn_precision}")
+
+def _tcnn_precision(dtype):
+	if dtype is None:
+		return _C.preferred_precision()
+	if dtype == torch.float32:
+		return _C.Precision.Fp32
+	elif dtype == torch.float16:
+		return _C.Precision.Fp16
+	elif dtype == torch.bfloat16:
+		return _C.Precision.Bf16
+	else:
+		raise ValueError(f"Only fp32, fp16, or bf16 precision is supported, but got {dtype}")
 
 def supports_jit_fusion():
 	return _C.supports_jit_fusion()
@@ -247,8 +261,8 @@ class NetworkWithInputEncoding(Module):
 	Takes a `torch.float` input tensor of shape `[:, n_input_dims]` and maps
 	it to a tensor of shape `[:, n_output_dims]`.
 
-	The output tensor can be either of type `torch.float` or `torch.half`,
-	depending on which performs better on the system.
+	The output tensor can be of type `torch.float`, `torch.half`, or
+	`torch.bfloat16`, depending on the requested dtype and system support.
 
 	Parameters
 	----------
@@ -264,8 +278,11 @@ class NetworkWithInputEncoding(Module):
 		https://github.com/NVlabs/tiny-cuda-nn/blob/master/DOCUMENTATION.md
 	seed: `int`
 		Seed for pseudorandom parameter initialization
+	dtype: `torch.dtype`
+		Precision of the output tensor and internal parameters. `None` uses
+		the system default.
 	"""
-	def __init__(self, n_input_dims, n_output_dims, encoding_config, network_config, seed=1337):
+	def __init__(self, n_input_dims, n_output_dims, encoding_config, network_config, seed=1337, dtype=None):
 		if not _C.has_networks():
 			raise RuntimeError(f"Cannot create `NetworkWithInputEncoding` because tiny-cuda-nn was not compiled with neural network support.")
 
@@ -273,11 +290,12 @@ class NetworkWithInputEncoding(Module):
 		self.n_output_dims = n_output_dims
 		self.encoding_config = encoding_config
 		self.network_config = network_config
+		self.precision = _tcnn_precision(dtype)
 
 		super(NetworkWithInputEncoding, self).__init__(seed=seed)
 
 	def _native_tcnn_module(self):
-		return _C.create_network_with_input_encoding(self.n_input_dims, self.n_output_dims, self.encoding_config, self.network_config)
+		return _C.create_network_with_input_encoding(self.n_input_dims, self.n_output_dims, self.encoding_config, self.network_config, self.precision)
 
 class Network(Module):
 	"""
@@ -286,8 +304,8 @@ class Network(Module):
 	Takes a `torch.float` input tensor of shape `[:, n_input_dims]` and maps
 	it to a tensor of shape `[:, n_output_dims]`.
 
-	The output tensor can be either of type `torch.float` or `torch.half`,
-	depending on which performs better on the system.
+	The output tensor can be of type `torch.float`, `torch.half`, or
+	`torch.bfloat16`, depending on the requested dtype and system support.
 
 	Parameters
 	----------
@@ -300,19 +318,23 @@ class Network(Module):
 		https://github.com/NVlabs/tiny-cuda-nn/blob/master/DOCUMENTATION.md
 	seed: `int`
 		Seed for pseudorandom parameter initialization
+	dtype: `torch.dtype`
+		Precision of the output tensor and internal parameters. `None` uses
+		the system default.
 	"""
-	def __init__(self, n_input_dims, n_output_dims, network_config, seed=1337):
+	def __init__(self, n_input_dims, n_output_dims, network_config, seed=1337, dtype=None):
 		if not _C.has_networks():
 			raise RuntimeError(f"Cannot create `Network` because tiny-cuda-nn was not compiled with neural network support.")
 
 		self.n_input_dims = n_input_dims
 		self.n_output_dims = n_output_dims
 		self.network_config = network_config
+		self.precision = _tcnn_precision(dtype)
 
 		super(Network, self).__init__(seed=seed)
 
 	def _native_tcnn_module(self):
-		return _C.create_network(self.n_input_dims, self.n_output_dims, self.network_config)
+		return _C.create_network(self.n_input_dims, self.n_output_dims, self.network_config, self.precision)
 
 class Encoding(Module):
 	"""
@@ -337,20 +359,13 @@ class Encoding(Module):
 		of `None` corresponds to the optimally performing precision,
 		which is `torch.half` on most systems. A value of `torch.float`
 		may yield higher numerical accuracy, but is generally slower.
-		A value of `torch.half` may not be supported on all systems.
+		A value of `torch.half` or `torch.bfloat16` may not be supported
+		on all systems.
 	"""
 	def __init__(self, n_input_dims, encoding_config, seed=1337, dtype=None):
 		self.n_input_dims = n_input_dims
 		self.encoding_config = encoding_config
-		if dtype is None:
-			self.precision = _C.preferred_precision()
-		else:
-			if dtype == torch.float32:
-				self.precision = _C.Precision.Fp32
-			elif dtype == torch.float16:
-				self.precision = _C.Precision.Fp16
-			else:
-				raise ValueError(f"Encoding only supports fp32 or fp16 precision, but got {dtype}")
+		self.precision = _tcnn_precision(dtype)
 
 		super(Encoding, self).__init__(seed=seed)
 

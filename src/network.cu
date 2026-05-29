@@ -46,7 +46,15 @@ void extract_dimension_pos_neg(cudaStream_t stream, const uint32_t num_elements,
 	linear_kernel(extract_dimension_pos_neg_kernel<T>, 0, stream, num_elements, dim, fan_in, fan_out, encoded, layout, output);
 }
 
-template void extract_dimension_pos_neg(cudaStream_t stream, const uint32_t num_elements, const uint32_t dim, const uint32_t fan_in, const uint32_t fan_out, const network_precision_t* encoded, MatrixLayout layout, float* output);
+#if !TCNN_HALF_PRECISION
+template void extract_dimension_pos_neg(cudaStream_t stream, const uint32_t num_elements, const uint32_t dim, const uint32_t fan_in, const uint32_t fan_out, const float* encoded, MatrixLayout layout, float* output);
+#endif
+#if TCNN_HALF_PRECISION
+template void extract_dimension_pos_neg(cudaStream_t stream, const uint32_t num_elements, const uint32_t dim, const uint32_t fan_in, const uint32_t fan_out, const __half* encoded, MatrixLayout layout, float* output);
+#endif
+#if TCNN_HAS_CUDA_BF16
+template void extract_dimension_pos_neg(cudaStream_t stream, const uint32_t num_elements, const uint32_t dim, const uint32_t fan_in, const uint32_t fan_out, const __nv_bfloat16* encoded, MatrixLayout layout, float* output);
+#endif
 
 std::string select_network(const json& network) {
 	std::string otype = network.value("otype", "MLP");
@@ -98,13 +106,20 @@ uint32_t minimum_alignment(const json& network) {
 }
 
 template <typename T>
-Network<T>* create_network(const json& network) {
-	std::string network_type = select_network(network);
+struct supports_fully_fused_network_precision : std::integral_constant<bool,
+	std::is_same<T, __half>::value
+#if TCNN_HAS_CUDA_BF16 && TCNN_MIN_GPU_ARCH >= 80
+	|| std::is_same<T, __nv_bfloat16>::value
+#endif
+> {};
 
-	if (equals_case_insensitive(network_type, "FullyFusedMLP")) {
-		if (!std::is_same<network_precision_t, __half>::value) {
-			throw std::runtime_error{"FullyFusedMLP can only be used if the network precision is set to __half."};
-		} else {
+template <typename T>
+Network<T>* create_fully_fused_network(const json& network, std::false_type) {
+	throw std::runtime_error{"FullyFusedMLP can only be used if the requested network precision is __half or __nv_bfloat16 on supported GPU architectures."};
+}
+
+template <typename T>
+Network<T>* create_fully_fused_network(const json& network, std::true_type) {
 #if TCNN_MIN_GPU_ARCH > 70
 #  define TCNN_FULLY_FUSED_PARAMS \
 	network["n_input_dims"], \
@@ -113,19 +128,31 @@ Network<T>* create_network(const json& network) {
 	string_to_activation(network.value("activation", "ReLU")), \
 	string_to_activation(network.value("output_activation", "None")),
 
-			uint32_t n_neurons = network.value("n_neurons", 128u);
-			switch (n_neurons) {
-				case  16: return new FullyFusedMLP<T,  16>{TCNN_FULLY_FUSED_PARAMS};
-				case  32: return new FullyFusedMLP<T,  32>{TCNN_FULLY_FUSED_PARAMS};
-				case  64: return new FullyFusedMLP<T,  64>{TCNN_FULLY_FUSED_PARAMS};
-				case 128: return new FullyFusedMLP<T, 128>{TCNN_FULLY_FUSED_PARAMS};
-				default: throw std::runtime_error{fmt::format("FullyFusedMLP only supports 16, 32, 64, and 128 neurons, but got {}. Use CutlassMLP instead if this is a requirement.", n_neurons)};
-			}
+	uint32_t n_neurons = network.value("n_neurons", 128u);
+	switch (n_neurons) {
+		case  16: return new FullyFusedMLP<T,  16>{TCNN_FULLY_FUSED_PARAMS};
+		case  32: return new FullyFusedMLP<T,  32>{TCNN_FULLY_FUSED_PARAMS};
+		case  64: return new FullyFusedMLP<T,  64>{TCNN_FULLY_FUSED_PARAMS};
+		case 128: return new FullyFusedMLP<T, 128>{TCNN_FULLY_FUSED_PARAMS};
+		default: throw std::runtime_error{fmt::format("FullyFusedMLP only supports 16, 32, 64, and 128 neurons, but got {}. Use CutlassMLP instead if this is a requirement.", n_neurons)};
+	}
 #  undef TCNN_FULLY_FUSED_PARAMS
 #else //TCNN_MIN_GPU_ARCH > 70
-			throw std::runtime_error{"FullyFusedMLP was not compiled due to insufficient GPU arch of <=70."};
+	throw std::runtime_error{"FullyFusedMLP was not compiled due to insufficient GPU arch of <=70."};
 #endif //TCNN_MIN_GPU_ARCH > 70
-		}
+}
+
+template <typename T>
+Network<T>* create_network(const json& network) {
+	std::string network_type = select_network(network);
+
+	if (equals_case_insensitive(network_type, "FullyFusedMLP") && !supports_fully_fused_network_precision<T>::value) {
+		log_warning("FullyFusedMLP is not supported for the requested precision. Falling back to CutlassMLP.");
+		network_type = "CutlassMLP";
+	}
+
+	if (equals_case_insensitive(network_type, "FullyFusedMLP")) {
+		return create_fully_fused_network<T>(network, supports_fully_fused_network_precision<T>{});
 	} else if (equals_case_insensitive(network_type, "CutlassMLP")) {
 		return new CutlassMLP<T>{
 			network["n_input_dims"],
@@ -140,7 +167,15 @@ Network<T>* create_network(const json& network) {
 	throw std::runtime_error{fmt::format("Invalid network type: {}", network_type)};
 }
 
-template Network<network_precision_t>* create_network(const json& network);
+#if !TCNN_HALF_PRECISION
+template Network<float>* create_network(const json& network);
+#endif
+#if TCNN_HALF_PRECISION
+template Network<__half>* create_network(const json& network);
+#endif
+#if TCNN_HAS_CUDA_BF16
+template Network<__nv_bfloat16>* create_network(const json& network);
+#endif
 
 std::vector<std::string> builtin_networks() {
 	return {
@@ -154,6 +189,40 @@ std::unique_ptr<CudaRtcKernel> generate_mlp_convert_params_to_jit_layout_kernel<
 	throw std::runtime_error{"FP32 MLP device code generation not supported."};
 }
 
+#if TCNN_HAS_CUDA_BF16
+template <>
+std::unique_ptr<CudaRtcKernel> generate_mlp_convert_params_to_jit_layout_kernel<__nv_bfloat16>(uint32_t input_width, uint32_t width, uint32_t padded_output_width, uint32_t n_hidden) {
+	return std::make_unique<CudaRtcKernel>("mlp_convert_params_to_jit_layout", dfmt(0, R"(
+			__global__ void mlp_convert_params_to_jit_layout({T}* __restrict__ params) {{
+				if ({N_HIDDEN} == 0) {{
+					auto mat = bf16_mma_mat<{N_DIMS_IN}, {N_DIMS_OUT}>::from_linear_memory(params);
+					mat.into_native_memory(params);
+					return;
+				}}
+
+				if (blockIdx.x == 0) {{
+					auto first_mat = bf16_mma_mat<{N_DIMS_IN}, {N_DIMS_HIDDEN}>::from_linear_memory(params);
+					first_mat.into_native_memory(params);
+				}} else if (blockIdx.x == 1) {{
+					params += {N_DIMS_IN} * {N_DIMS_HIDDEN} + ({N_HIDDEN} - 1) * {N_DIMS_HIDDEN} * {N_DIMS_HIDDEN};
+					auto last_mat = bf16_mma_mat<{N_DIMS_HIDDEN}, {N_DIMS_OUT}>::from_linear_memory(params);
+					last_mat.into_native_memory(params);
+				}} else {{
+					params += {N_DIMS_IN} * {N_DIMS_HIDDEN} + (blockIdx.x - 2) * {N_DIMS_HIDDEN} * {N_DIMS_HIDDEN};
+					auto hidden_mat = bf16_mma_mat<{N_DIMS_HIDDEN}, {N_DIMS_HIDDEN}>::from_linear_memory(params);
+					hidden_mat.into_native_memory(params);
+				}}
+			}}
+		)",
+		"T"_a = type_to_string<__nv_bfloat16>(),
+		"N_DIMS_IN"_a = input_width,
+		"N_DIMS_HIDDEN"_a = width,
+		"N_DIMS_OUT"_a = padded_output_width,
+		"N_HIDDEN"_a = n_hidden
+	));
+}
+
+#endif
 template <>
 std::unique_ptr<CudaRtcKernel> generate_mlp_convert_params_to_jit_layout_kernel<__half>(uint32_t input_width, uint32_t width, uint32_t padded_output_width, uint32_t n_hidden) {
 	return std::make_unique<CudaRtcKernel>("mlp_convert_params_to_jit_layout", dfmt(0, R"(
@@ -191,6 +260,40 @@ std::unique_ptr<CudaRtcKernel> generate_mlp_convert_params_from_jit_layout_kerne
 	throw std::runtime_error{"FP32 MLP device code generation not supported."};
 }
 
+#if TCNN_HAS_CUDA_BF16
+template <>
+std::unique_ptr<CudaRtcKernel> generate_mlp_convert_params_from_jit_layout_kernel<__nv_bfloat16>(uint32_t input_width, uint32_t width, uint32_t padded_output_width, uint32_t n_hidden) {
+	return std::make_unique<CudaRtcKernel>("mlp_convert_params_from_jit_layout", dfmt(0, R"(
+			__global__ void mlp_convert_params_from_jit_layout({T}* __restrict__ params) {{
+				if ({N_HIDDEN} == 0) {{
+					auto mat = bf16_mma_mat<{N_DIMS_IN}, {N_DIMS_OUT}>::from_native_memory(params);
+					mat.into_linear_memory(params);
+					return;
+				}}
+
+				if (blockIdx.x == 0) {{
+					auto first_mat = bf16_mma_mat<{N_DIMS_IN}, {N_DIMS_HIDDEN}>::from_native_memory(params);
+					first_mat.into_linear_memory(params);
+				}} else if (blockIdx.x == 1) {{
+					params += {N_DIMS_IN} * {N_DIMS_HIDDEN} + ({N_HIDDEN} - 1) * {N_DIMS_HIDDEN} * {N_DIMS_HIDDEN};
+					auto last_mat = bf16_mma_mat<{N_DIMS_HIDDEN}, {N_DIMS_OUT}>::from_native_memory(params);
+					last_mat.into_linear_memory(params);
+				}} else {{
+					params += {N_DIMS_IN} * {N_DIMS_HIDDEN} + (blockIdx.x - 2) * {N_DIMS_HIDDEN} * {N_DIMS_HIDDEN};
+					auto hidden_mat = bf16_mma_mat<{N_DIMS_HIDDEN}, {N_DIMS_HIDDEN}>::from_native_memory(params);
+					hidden_mat.into_linear_memory(params);
+				}}
+			}}
+		)",
+		"T"_a = type_to_string<__nv_bfloat16>(),
+		"N_DIMS_IN"_a = input_width,
+		"N_DIMS_HIDDEN"_a = width,
+		"N_DIMS_OUT"_a = padded_output_width,
+		"N_HIDDEN"_a = n_hidden
+	));
+}
+
+#endif
 template <>
 std::unique_ptr<CudaRtcKernel> generate_mlp_convert_params_from_jit_layout_kernel<__half>(uint32_t input_width, uint32_t width, uint32_t padded_output_width, uint32_t n_hidden) {
 	return std::make_unique<CudaRtcKernel>("mlp_convert_params_from_jit_layout", dfmt(0, R"(
@@ -228,6 +331,91 @@ std::string generate_mlp_device_code<float>(uint32_t input_width, uint32_t width
 	throw std::runtime_error{"FP32 MLP device code generation not supported."};
 }
 
+#if TCNN_HAS_CUDA_BF16
+template <>
+std::string generate_mlp_device_code<__nv_bfloat16>(uint32_t input_width, uint32_t width, uint32_t padded_output_width, uint32_t output_width, uint32_t n_hidden, Activation activation, Activation output_activation) {
+	std::string output_activation_body = output_activation == Activation::None ? "" : dfmt(1, R"(
+			if (fwd_ctx) {{
+				out.into_native_memory(({T}*)fwd_ctx);
+			}}
+
+			out.activate<Activation::{ACT_OUT}>();
+		)",
+		"T"_a = type_to_string<__nv_bfloat16>(),
+		"ACT_OUT"_a = to_string(output_activation)
+	);
+
+	if (n_hidden == 0) {
+		return dfmt(1, R"(
+				bf16_mma_vec<{N_DIMS_IN}> in{{input}};
+
+				if (fwd_ctx) {{
+					in.into_native_memory(({T}*)fwd_ctx);
+					fwd_ctx += in.M * in.N * sizeof({T});
+				}}
+
+				auto mat = bf16_mma_mat<{N_DIMS_IN}, {N_PADDED_DIMS_OUT}>::from_native_memory(params);
+				auto out = in * mat;
+				{OUTPUT_ACTIVATION_BODY}
+
+				return out.vec<{N_DIMS_OUT}>();
+			)",
+			"T"_a = type_to_string<__nv_bfloat16>(),
+			"N_DIMS_IN"_a = input_width,
+			"N_PADDED_DIMS_OUT"_a = padded_output_width,
+			"N_DIMS_OUT"_a = output_width,
+			"OUTPUT_ACTIVATION_BODY"_a = output_activation_body
+		);
+	}
+
+	return dfmt(1, R"(
+			bf16_mma_vec<{N_DIMS_IN}> in{{input}};
+			if (fwd_ctx) {{
+				in.into_native_memory(({T}*)fwd_ctx);
+				fwd_ctx += 32 * sizeof({T}) * {N_DIMS_IN};
+			}}
+
+			auto first_mat = bf16_mma_mat<{N_DIMS_IN}, {N_DIMS_HIDDEN}>::from_native_memory(params);
+			params += {N_DIMS_IN} * {N_DIMS_HIDDEN};
+
+			auto hidden = in * first_mat;
+			hidden.activate<Activation::{ACT}>();
+
+			if (fwd_ctx) {{
+				hidden.into_native_memory(({T}*)fwd_ctx);
+				fwd_ctx += 32 * sizeof({T}) * {N_DIMS_HIDDEN};
+			}}
+
+			TCNN_PRAGMA_UNROLL
+			for (uint32_t i = 0; i < {N_HIDDEN_MATMULS}; ++i) {{
+				auto hidden_mat = bf16_mma_mat<{N_DIMS_HIDDEN}, {N_DIMS_HIDDEN}>::from_native_memory(params);
+				params += {N_DIMS_HIDDEN} * {N_DIMS_HIDDEN};
+				hidden = hidden * hidden_mat;
+				hidden.activate<Activation::{ACT}>();
+
+				if (fwd_ctx) {{
+					hidden.into_native_memory(({T}*)fwd_ctx);
+					fwd_ctx += 32 * sizeof({T}) * {N_DIMS_HIDDEN};
+				}}
+			}}
+
+			auto last_mat = bf16_mma_mat<{N_DIMS_HIDDEN}, {N_PADDED_DIMS_OUT}>::from_native_memory(params);
+			auto out = hidden * last_mat;
+			{OUTPUT_ACTIVATION_BODY}
+
+			return out.vec<{N_DIMS_OUT}>();
+		)",
+		"T"_a = type_to_string<__nv_bfloat16>(),
+		"N_DIMS_IN"_a = input_width,
+		"N_DIMS_HIDDEN"_a = width,
+		"N_PADDED_DIMS_OUT"_a = padded_output_width,
+		"N_DIMS_OUT"_a = output_width,
+		"N_HIDDEN_MATMULS"_a = n_hidden-1,
+		"ACT"_a = to_string(activation),
+		"OUTPUT_ACTIVATION_BODY"_a = output_activation_body
+	);
+}
+#endif
 template <>
 std::string generate_mlp_device_code<__half>(uint32_t input_width, uint32_t width, uint32_t padded_output_width, uint32_t output_width, uint32_t n_hidden, Activation activation, Activation output_activation) {
 	std::string output_activation_body = output_activation == Activation::None ? "" : dfmt(1, R"(
@@ -317,6 +505,98 @@ std::string generate_backward_mlp_device_code<float>(uint32_t n_threads, uint32_
 	throw std::runtime_error{"FP32 MLP device code generation not supported."};
 }
 
+#if TCNN_HAS_CUDA_BF16
+template <>
+std::string generate_backward_mlp_device_code<__nv_bfloat16>(uint32_t n_threads, uint32_t input_width, uint32_t width, uint32_t padded_output_width, uint32_t output_width, uint32_t n_hidden, Activation activation, Activation output_activation) {
+	std::string output_activation_body = output_activation == Activation::None ? "" : dfmt(1, R"(
+			auto out = bf16_mma_vec<{N_PADDED_DIMS_OUT}>::from_native_memory(({T}*)fwd_ctx + 32 * ({N_DIMS_IN} + {N_HIDDEN} * {N_DIMS_HIDDEN}));
+			out_grad.activate_bwd<Activation::{ACT_OUT}>(out);
+		)",
+		"T"_a = type_to_string<__nv_bfloat16>(),
+		"N_DIMS_IN"_a = input_width,
+		"N_HIDDEN"_a = n_hidden,
+		"N_DIMS_HIDDEN"_a = width,
+		"N_PADDED_DIMS_OUT"_a = padded_output_width,
+		"ACT_OUT"_a = to_string(output_activation)
+	);
+
+	if (n_hidden == 0) {
+		return dfmt(1, R"(
+				bf16_mma_vec<{N_PADDED_DIMS_OUT}> out_grad{{dL_dy}};
+				{OUTPUT_ACTIVATION_BODY}
+
+				auto in = bf16_mma_vec<{N_DIMS_IN}>::from_native_memory(({T}*)fwd_ctx);
+				if (dL_dparams) {{
+					outer_product(out_grad, in).sum_into_linear_global_memory_hierarchical<{N_THREADS}>(dL_dparams);
+				}}
+
+				if (!dL_dx) {{
+					return;
+				}}
+
+				auto mat = bf16_mma_mat<{N_DIMS_IN}, {N_PADDED_DIMS_OUT}>::from_native_memory(params);
+				auto in_grad = out_grad * mat.transpose();
+				*dL_dx = in_grad.vec<{N_DIMS_IN}>();
+			)",
+			"T"_a = type_to_string<__nv_bfloat16>(),
+			"N_DIMS_IN"_a = input_width,
+			"N_PADDED_DIMS_OUT"_a = padded_output_width,
+			"N_THREADS"_a = n_threads,
+			"OUTPUT_ACTIVATION_BODY"_a = output_activation_body
+		);
+	}
+
+	return dfmt(1, R"(
+			bf16_mma_vec<{N_PADDED_DIMS_OUT}> out_grad{{dL_dy}};
+			{OUTPUT_ACTIVATION_BODY}
+
+			auto hidden = bf16_mma_vec<{N_DIMS_HIDDEN}>::from_native_memory(({T}*)fwd_ctx + 32 * ({N_DIMS_IN} + {N_HIDDEN_MATMULS} * {N_DIMS_HIDDEN}));
+			if (dL_dparams) {{
+				outer_product(out_grad, hidden).sum_into_linear_global_memory_hierarchical<{N_THREADS}>(dL_dparams + {N_DIMS_HIDDEN} * ({N_DIMS_IN} + {N_HIDDEN_MATMULS} * {N_DIMS_HIDDEN}));
+			}}
+
+			auto out_mat = bf16_mma_mat<{N_DIMS_HIDDEN}, {N_PADDED_DIMS_OUT}>::from_native_memory(params + {N_DIMS_HIDDEN} * ({N_DIMS_IN} + {N_HIDDEN_MATMULS} * {N_DIMS_HIDDEN}));
+			auto hidden_grad = out_grad * out_mat.transpose();
+			hidden_grad.activate_bwd<Activation::{ACT}>(hidden);
+
+			TCNN_PRAGMA_UNROLL
+			for (int i = {N_HIDDEN_MATMULS}-1; i >= 0; --i) {{
+				hidden = bf16_mma_vec<{N_DIMS_HIDDEN}>::from_native_memory(({T}*)fwd_ctx + 32 * ({N_DIMS_IN} + i * {N_DIMS_HIDDEN}));
+				if (dL_dparams) {{
+					outer_product(hidden_grad, hidden).sum_into_linear_global_memory_hierarchical<{N_THREADS}>(dL_dparams + {N_DIMS_HIDDEN} * ({N_DIMS_IN} + i * {N_DIMS_HIDDEN}));
+				}}
+
+				auto hidden_mat = bf16_mma_mat<{N_DIMS_HIDDEN}, {N_DIMS_HIDDEN}>::from_native_memory(params + {N_DIMS_HIDDEN} * ({N_DIMS_IN} + i * {N_DIMS_HIDDEN}));
+				hidden_grad = hidden_grad * hidden_mat.transpose();
+				hidden_grad.activate_bwd<Activation::{ACT}>(hidden);
+			}}
+
+			auto in = bf16_mma_vec<{N_DIMS_IN}>::from_native_memory(({T}*)fwd_ctx);
+			if (dL_dparams) {{
+				outer_product(hidden_grad, in).sum_into_linear_global_memory_hierarchical<{N_THREADS}>(dL_dparams);
+			}}
+
+			if (!dL_dx) {{
+				return;
+			}}
+
+			auto in_mat = bf16_mma_mat<{N_DIMS_IN}, {N_DIMS_HIDDEN}>::from_native_memory(params);
+			auto in_grad = hidden_grad * in_mat.transpose();
+			*dL_dx = in_grad.vec<{N_DIMS_IN}>();
+		)",
+		"T"_a = type_to_string<__nv_bfloat16>(),
+		"N_DIMS_IN"_a = input_width,
+		"N_DIMS_OUT"_a = output_width,
+		"N_PADDED_DIMS_OUT"_a = padded_output_width,
+		"N_DIMS_OUT"_a = output_width,
+		"N_HIDDEN_MATMULS"_a = n_hidden-1,
+		"N_DIMS_HIDDEN"_a = width,
+		"N_THREADS"_a = n_threads,
+		"ACT"_a = to_string(activation),
+		"OUTPUT_ACTIVATION_BODY"_a = output_activation_body
+	);
+}
+#endif
 template <>
 std::string generate_backward_mlp_device_code<__half>(uint32_t n_threads, uint32_t input_width, uint32_t width, uint32_t padded_output_width, uint32_t output_width, uint32_t n_hidden, Activation activation, Activation output_activation) {
 	std::string output_activation_body = output_activation == Activation::None ? "" : dfmt(1, R"(

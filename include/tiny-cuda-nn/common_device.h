@@ -207,6 +207,7 @@ template <Activation activation, typename T, uint32_t N, size_t A = sizeof(T)>
 __host__ __device__ tvec<T, N, A> vec_activation(tvec<T, N, A>& v) {
 	using fragment_t = vector_fragment_t<T, N, A>;
 	warp_activation<T, fragment_t, activation>(*(fragment_t*)&v, *(fragment_t*)&v);
+	return v;
 }
 
 template <typename T, uint32_t N, size_t A = sizeof(T)>

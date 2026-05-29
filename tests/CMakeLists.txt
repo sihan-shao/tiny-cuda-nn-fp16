@@ -27,6 +27,8 @@ function (create_test TEST_NAME)
 endfunction()
 
 create_test(test_encodings)
+create_test(test_bf16_performance)
+create_test(test_fully_fused_mlp_bf16)
 create_test(test_grid)
 create_test(test_jit_losses)
 create_test(test_networks)

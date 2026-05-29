@@ -54,10 +54,25 @@ bool has_networks() {
 }
 
 float default_loss_scale(Precision p) {
-	return p == Precision::Fp32 ? tcnn::default_loss_scale<float>() : tcnn::default_loss_scale<__half>();
+	switch (p) {
+		case Precision::Fp32: return tcnn::default_loss_scale<float>();
+		case Precision::Fp16: return tcnn::default_loss_scale<__half>();
+#if TCNN_HAS_CUDA_BF16
+		case Precision::Bf16: return tcnn::default_loss_scale<__nv_bfloat16>();
+#else
+		case Precision::Bf16: throw std::runtime_error{"TCNN was not compiled with bf16 support."};
+#endif
+	}
+
+	throw std::runtime_error{"Unknown precision."};
 }
 
-template <typename T> constexpr Precision precision() { return std::is_same<T, float>::value ? Precision::Fp32 : Precision::Fp16; }
+template <typename T> constexpr Precision precision();
+template <> constexpr Precision precision<float>() { return Precision::Fp32; }
+template <> constexpr Precision precision<__half>() { return Precision::Fp16; }
+#if TCNN_HAS_CUDA_BF16
+template <> constexpr Precision precision<__nv_bfloat16>() { return Precision::Bf16; }
+#endif
 Precision preferred_precision() { return precision<network_precision_t>(); }
 
 bool supports_jit_fusion(int device) { return device < 0 ? tcnn::supports_jit_fusion() : tcnn::supports_jit_fusion(device); }
@@ -153,24 +168,57 @@ private:
 };
 
 #if !defined(TCNN_NO_NETWORKS)
+Module* create_network_with_input_encoding(uint32_t n_input_dims, uint32_t n_output_dims, const json& encoding, const json& network, Precision requested_precision) {
+	switch (requested_precision) {
+#if TCNN_HALF_PRECISION
+		case Precision::Fp32: throw std::runtime_error{"TCNN was compiled with half-precision network support; fp32 networks are not available in this build."};
+#else
+		case Precision::Fp32: return new DifferentiableObject<float>{new tcnn::NetworkWithInputEncoding<float>{n_input_dims, n_output_dims, encoding, network}};
+#endif
+#if TCNN_HALF_PRECISION
+		case Precision::Fp16: return new DifferentiableObject<__half>{new tcnn::NetworkWithInputEncoding<__half>{n_input_dims, n_output_dims, encoding, network}};
+#else
+		case Precision::Fp16: throw std::runtime_error{"TCNN was not compiled with half-precision support."};
+#endif
+#if TCNN_HAS_CUDA_BF16
+		case Precision::Bf16: return new DifferentiableObject<__nv_bfloat16>{new tcnn::NetworkWithInputEncoding<__nv_bfloat16>{n_input_dims, n_output_dims, encoding, network}};
+#else
+		case Precision::Bf16: throw std::runtime_error{"TCNN was not compiled with bf16 support."};
+#endif
+	}
+
+	throw std::runtime_error{"Unknown precision."};
+}
+
 Module* create_network_with_input_encoding(uint32_t n_input_dims, uint32_t n_output_dims, const json& encoding, const json& network) {
-	return new DifferentiableObject<network_precision_t>{new tcnn::NetworkWithInputEncoding<network_precision_t>{n_input_dims, n_output_dims, encoding, network}};
+	return create_network_with_input_encoding(n_input_dims, n_output_dims, encoding, network, preferred_precision());
+}
+
+Module* create_network(uint32_t n_input_dims, uint32_t n_output_dims, const json& network, Precision requested_precision) {
+	return create_network_with_input_encoding(n_input_dims, n_output_dims, {{"otype", "Identity"}}, network, requested_precision);
 }
 
 Module* create_network(uint32_t n_input_dims, uint32_t n_output_dims, const json& network) {
-	return create_network_with_input_encoding(n_input_dims, n_output_dims, {{"otype", "Identity"}}, network);
+	return create_network(n_input_dims, n_output_dims, network, preferred_precision());
 }
 #endif // !defined(TCNN_NO_NETWORKS)
 
 Module* create_encoding(uint32_t n_input_dims, const json& encoding, Precision requested_precision) {
-	if (requested_precision == Precision::Fp32) {
-		return new DifferentiableObject<float>{tcnn::create_encoding<float>(n_input_dims, encoding, 0)};
-	}
+	switch (requested_precision) {
+		case Precision::Fp32: return new DifferentiableObject<float>{tcnn::create_encoding<float>(n_input_dims, encoding, 0)};
 #if TCNN_HALF_PRECISION
-	return new DifferentiableObject<__half>{tcnn::create_encoding<__half>(n_input_dims, encoding, 0)};
+		case Precision::Fp16: return new DifferentiableObject<__half>{tcnn::create_encoding<__half>(n_input_dims, encoding, 0)};
 #else
-	throw std::runtime_error{"TCNN was not compiled with half-precision support."};
+		case Precision::Fp16: throw std::runtime_error{"TCNN was not compiled with half-precision support."};
 #endif
+#if TCNN_HAS_CUDA_BF16
+		case Precision::Bf16: return new DifferentiableObject<__nv_bfloat16>{tcnn::create_encoding<__nv_bfloat16>(n_input_dims, encoding, 0)};
+#else
+		case Precision::Bf16: throw std::runtime_error{"TCNN was not compiled with bf16 support."};
+#endif
+	}
+
+	throw std::runtime_error{"Unknown precision."};
 }
 
 }}

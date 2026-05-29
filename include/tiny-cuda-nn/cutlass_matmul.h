@@ -56,16 +56,50 @@ namespace tcnn {
 			throw std::runtime_error(std::string(FILE_LINE " " #x " failed with error ") + cutlassGetStatusString(_result)); \
 	} while(0)
 
-using SmArch = std::conditional_t<MIN_GPU_ARCH >= 80,
-	std::conditional_t<std::is_same<network_precision_t, float>::value, cutlass::arch::Sm75, cutlass::arch::Sm80>,
+template <typename T>
+struct CutlassPrecision {
+	using Element = T;
+	using Accumulator = T;
+	using Compute = T;
+};
+
+template <>
+struct CutlassPrecision<__half> {
+	using Element = cutlass::half_t;
+	using Accumulator = cutlass::half_t;
+	using Compute = cutlass::half_t;
+};
+
+#ifdef TCNN_HAS_CUDA_BF16
+template <>
+struct CutlassPrecision<__nv_bfloat16> {
+	using Element = cutlass::bfloat16_t;
+	using Accumulator = float;
+	using Compute = float;
+};
+#endif
+
+template <typename T>
+using CutlassElement = typename CutlassPrecision<T>::Element;
+
+template <typename T>
+using CutlassAccumulator = typename CutlassPrecision<T>::Accumulator;
+
+template <typename T>
+using CutlassCompute = typename CutlassPrecision<T>::Compute;
+
+template <typename T>
+using SmArchFor = std::conditional_t<MIN_GPU_ARCH >= 80,
+	std::conditional_t<std::is_same<T, float>::value, cutlass::arch::Sm75, cutlass::arch::Sm80>,
 	std::conditional_t<MIN_GPU_ARCH >= 75,
 		cutlass::arch::Sm75,
 		cutlass::arch::Sm70
 	>
 >;
 
-using TypeAccumulator = std::conditional_t<std::is_same<network_precision_t, float>::value, float, cutlass::half_t>;
-using TypeCompute = std::conditional_t<std::is_same<network_precision_t, float>::value, float, cutlass::half_t>;
+using SmArch = SmArchFor<network_precision_t>;
+using TypeAccumulator = CutlassAccumulator<network_precision_t>;
+using TypeCompute = CutlassCompute<network_precision_t>;
 
 template <typename T>
 using MMAOp = typename std::conditional<
@@ -78,7 +112,7 @@ template <typename T>
 using ShapeMMAOp = typename std::conditional<
 	std::is_same<MMAOp<T>, cutlass::arch::OpClassTensorOp>::value,
 	typename std::conditional<
-		std::is_same<SmArch, cutlass::arch::Sm80>::value || std::is_same<SmArch, cutlass::arch::Sm75>::value,
+		std::is_same<SmArchFor<T>, cutlass::arch::Sm80>::value || std::is_same<SmArchFor<T>, cutlass::arch::Sm75>::value,
 		cutlass::gemm::GemmShape<16, 8, 8>,
 		cutlass::gemm::GemmShape<8, 8, 4>
 	>::type,
@@ -266,17 +300,17 @@ private:
 template <typename T>
 static constexpr int n_vectorized_elements = std::is_same<MMAOp<T>, cutlass::arch::OpClassTensorOp>::value ? (128 / cutlass::sizeof_bits<T>::value) : 1;
 
-template <typename T>
-using SumOp = cutlass::epilogue::thread::LinearCombination<T, n_vectorized_elements<T>, TypeAccumulator, TypeCompute>;
+template <typename T, typename Accumulator = TypeAccumulator, typename Compute = TypeCompute>
+using SumOp = cutlass::epilogue::thread::LinearCombination<T, n_vectorized_elements<T>, Accumulator, Compute>;
 
-template <typename T>
-using ActivationOp = ActivationEpilogue<T, n_vectorized_elements<T>, TypeAccumulator, TypeCompute>;
+template <typename T, typename Accumulator = TypeAccumulator, typename Compute = TypeCompute>
+using ActivationOp = ActivationEpilogue<T, n_vectorized_elements<T>, Accumulator, Compute>;
 
-template <typename T>
-using ActivationTransferOp = ActivationTransferEpilogue<T, n_vectorized_elements<T>, TypeAccumulator, TypeCompute>;
+template <typename T, typename Accumulator = TypeAccumulator, typename Compute = TypeCompute>
+using ActivationTransferOp = ActivationTransferEpilogue<T, n_vectorized_elements<T>, Accumulator, Compute>;
 
 
-template <typename EPILOGUE, typename LayerConfig, typename TypeA, typename LayoutA, typename TypeB, typename LayoutB, typename TypeOutput, typename LayoutOutput>
+template <typename EPILOGUE, typename LayerConfig, typename TypeA, typename LayoutA, typename TypeB, typename LayoutB, typename TypeOutput, typename LayoutOutput, typename Accumulator = TypeAccumulator>
 using OurGemm = cutlass::gemm::device::Gemm<
 	TypeA,
 	LayoutA,
@@ -284,9 +318,9 @@ using OurGemm = cutlass::gemm::device::Gemm<
 	LayoutB,
 	TypeOutput,
 	LayoutOutput,
-	TypeAccumulator,
+	Accumulator,
 	MMAOp<TypeA>,
-	SmArch,
+	SmArchFor<TypeA>,
 	typename LayerConfig::k_thread_block,
 	typename LayerConfig::k_warp,
 	ShapeMMAOp<TypeA>,
@@ -295,7 +329,7 @@ using OurGemm = cutlass::gemm::device::Gemm<
 	2
 >;
 
-template <typename EPILOGUE, typename LayerConfig, typename TypeA, typename LayoutA, typename TypeB, typename LayoutB, typename TypeOutput, typename LayoutOutput>
+template <typename EPILOGUE, typename LayerConfig, typename TypeA, typename LayoutA, typename TypeB, typename LayoutB, typename TypeOutput, typename LayoutOutput, typename Accumulator = TypeAccumulator>
 using SplitKGemm = cutlass::gemm::device::GemmSplitKParallel<
 	TypeA,
 	LayoutA,
@@ -303,9 +337,9 @@ using SplitKGemm = cutlass::gemm::device::GemmSplitKParallel<
 	LayoutB,
 	TypeOutput,
 	LayoutOutput,
-	TypeAccumulator,
+	Accumulator,
 	MMAOp<TypeA>,
-	SmArch,
+	SmArchFor<TypeA>,
 	typename LayerConfig::k_thread_block,
 	typename LayerConfig::k_warp,
 	ShapeMMAOp<TypeA>,
@@ -372,8 +406,11 @@ void fc_multiply(
 	static_assert(std::is_same<TypeC, TypeD>::value, "Type of matrix C and D must be equal");
 	static_assert(std::is_same<CutlassLayoutC, CutlassLayoutD>::value, "Layout of matrix C and D must be equal");
 
-	using MatmulTypeCompute = std::conditional_t<std::is_same<TypeA, float>::value, float, cutlass::half_t>;
-	using MatmulTypeAccumulator = std::conditional_t<std::is_same<TypeC, float>::value, float, cutlass::half_t>;
+	using MatmulTypeA = CutlassElement<TypeA>;
+	using MatmulTypeB = CutlassElement<TypeB>;
+	using MatmulTypeOutput = CutlassElement<TypeC>;
+	using MatmulTypeAccumulator = CutlassAccumulator<TypeC>;
+	using MatmulTypeCompute = CutlassCompute<TypeA>;
 
 	if (A.n() != B.m()) {
 		throw std::runtime_error("Matrices A and B can not be multiplied together");
@@ -392,26 +429,26 @@ void fc_multiply(
 	}
 
 	if (transfer) {
-		using Gemm = OurGemm<ActivationTransferOp<MatmulTypeAccumulator>, config, MatmulTypeCompute, CutlassLayoutA, MatmulTypeCompute, CutlassLayoutB, MatmulTypeAccumulator, CutlassLayoutC>;
+		using Gemm = OurGemm<ActivationTransferOp<MatmulTypeOutput, MatmulTypeAccumulator, MatmulTypeCompute>, config, MatmulTypeA, CutlassLayoutA, MatmulTypeB, CutlassLayoutB, MatmulTypeOutput, CutlassLayoutC, MatmulTypeAccumulator>;
 		typename Gemm::Arguments arguments{
 			{M, N, K},
-			{(MatmulTypeCompute*)A.data(), (int)A.stride()},
-			{(MatmulTypeCompute*)B.data(), (int)B.stride()},
-			{(MatmulTypeAccumulator*)C.data(), (int)C.stride()},
-			{(MatmulTypeAccumulator*)D.data(), (int)D.stride()},
+			{(MatmulTypeA*)A.data(), (int)A.stride()},
+			{(MatmulTypeB*)B.data(), (int)B.stride()},
+			{(MatmulTypeOutput*)C.data(), (int)C.stride()},
+			{(MatmulTypeOutput*)D.data(), (int)D.stride()},
 			{act},
 			1
 		};
 
 		fc_multiply_impl<Gemm>(stream, arguments);
 	} else {
-		using Gemm = OurGemm<ActivationOp<MatmulTypeAccumulator>, config, MatmulTypeCompute, CutlassLayoutA, MatmulTypeCompute, CutlassLayoutB, MatmulTypeAccumulator, CutlassLayoutC>;
+		using Gemm = OurGemm<ActivationOp<MatmulTypeOutput, MatmulTypeAccumulator, MatmulTypeCompute>, config, MatmulTypeA, CutlassLayoutA, MatmulTypeB, CutlassLayoutB, MatmulTypeOutput, CutlassLayoutC, MatmulTypeAccumulator>;
 		typename Gemm::Arguments arguments{
 			{M, N, K},
-			{(MatmulTypeCompute*)A.data(), (int)A.stride()},
-			{(MatmulTypeCompute*)B.data(), (int)B.stride()},
-			{(MatmulTypeAccumulator*)C.data(), (int)C.stride()},
-			{(MatmulTypeAccumulator*)D.data(), (int)D.stride()},
+			{(MatmulTypeA*)A.data(), (int)A.stride()},
+			{(MatmulTypeB*)B.data(), (int)B.stride()},
+			{(MatmulTypeOutput*)C.data(), (int)C.stride()},
+			{(MatmulTypeOutput*)D.data(), (int)D.stride()},
 			{act, sum_source},
 			1
 		};
@@ -494,8 +531,11 @@ void fc_multiply_split_k(
 	using CutlassLayoutC = typename std::conditional<LayoutC == RM, cutlass::layout::RowMajor, cutlass::layout::ColumnMajor>::type;
 	using CutlassLayoutD = typename std::conditional<LayoutD == RM, cutlass::layout::RowMajor, cutlass::layout::ColumnMajor>::type;
 
-	using MatmulTypeCompute = std::conditional_t<std::is_same<TypeA, float>::value, float, cutlass::half_t>;
-	using MatmulTypeAccumulator = std::conditional_t<std::is_same<TypeC, float>::value, float, cutlass::half_t>;
+	using MatmulTypeA = CutlassElement<TypeA>;
+	using MatmulTypeB = CutlassElement<TypeB>;
+	using MatmulTypeOutput = CutlassElement<TypeC>;
+	using MatmulTypeAccumulator = CutlassAccumulator<TypeC>;
+	using MatmulTypeCompute = CutlassCompute<TypeA>;
 
 	static_assert(std::is_same<TypeA, TypeB>::value, "Type of matrix A and B must be equal");
 	static_assert(std::is_same<TypeC, TypeD>::value, "Type of matrix C and D must be equal");
@@ -517,14 +557,14 @@ void fc_multiply_split_k(
 		throw std::runtime_error{fmt::format("Matrix D has incorrect size {}x{} != {}x{}", D.m(), D.n(), M, N)};
 	}
 
-	using Gemm = SplitKGemm<SumOp<MatmulTypeAccumulator>, config, MatmulTypeCompute, CutlassLayoutA, MatmulTypeCompute, CutlassLayoutB, MatmulTypeAccumulator, CutlassLayoutC>;
+	using Gemm = SplitKGemm<SumOp<MatmulTypeOutput, MatmulTypeAccumulator, MatmulTypeCompute>, config, MatmulTypeA, CutlassLayoutA, MatmulTypeB, CutlassLayoutB, MatmulTypeOutput, CutlassLayoutC, MatmulTypeAccumulator>;
 	typename Gemm::Arguments arguments{
 		{M, N, K},
-		{(MatmulTypeCompute*)A.data(), (int)A.stride()},
-		{(MatmulTypeCompute*)B.data(), (int)B.stride()},
-		{(MatmulTypeAccumulator*)C.data(), (int)C.stride()},
-		{(MatmulTypeAccumulator*)D.data(), (int)D.stride()},
-		{(TypeCompute)1.0f, (TypeCompute)beta},
+		{(MatmulTypeA*)A.data(), (int)A.stride()},
+		{(MatmulTypeB*)B.data(), (int)B.stride()},
+		{(MatmulTypeOutput*)C.data(), (int)C.stride()},
+		{(MatmulTypeOutput*)D.data(), (int)D.stride()},
+		{(MatmulTypeCompute)1.0f, (MatmulTypeCompute)beta},
 		(int)split_k_slices
 	};
 

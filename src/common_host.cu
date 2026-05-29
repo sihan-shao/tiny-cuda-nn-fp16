@@ -354,5 +354,8 @@ template <> std::string type_to_string<uint32_t>() { return "uint32_t"; }
 template <> std::string type_to_string<double>() { return "double"; }
 template <> std::string type_to_string<float>() { return "float"; }
 template <> std::string type_to_string<__half>() { return "__half"; }
+#if TCNN_HAS_CUDA_BF16
+template <> std::string type_to_string<__nv_bfloat16>() { return "__nv_bfloat16"; }
+#endif
 
 }

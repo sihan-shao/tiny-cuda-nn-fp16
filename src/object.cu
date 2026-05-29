@@ -48,6 +48,9 @@ void one_hot_batched(cudaStream_t stream, const uint32_t num_elements, const uin
 
 template void one_hot_batched(cudaStream_t stream, const uint32_t num_elements, const uint32_t width, const uint32_t one_hot_dim, float* out, float scale);
 template void one_hot_batched(cudaStream_t stream, const uint32_t num_elements, const uint32_t width, const uint32_t one_hot_dim, __half* out, float scale);
+#if TCNN_HAS_CUDA_BF16
+template void one_hot_batched(cudaStream_t stream, const uint32_t num_elements, const uint32_t width, const uint32_t one_hot_dim, __nv_bfloat16* out, float scale);
+#endif
 
 template <typename T>
 void mult(cudaStream_t stream, const uint32_t num_elements, T* inout, float factor) {
@@ -56,6 +59,9 @@ void mult(cudaStream_t stream, const uint32_t num_elements, T* inout, float fact
 
 template void mult(cudaStream_t stream, const uint32_t num_elements, float* inout, float factor);
 template void mult(cudaStream_t stream, const uint32_t num_elements, __half* inout, float factor);
+#if TCNN_HAS_CUDA_BF16
+template void mult(cudaStream_t stream, const uint32_t num_elements, __nv_bfloat16* inout, float factor);
+#endif
 
 template <typename T>
 void trim_and_cast_from(cudaStream_t stream, const MatrixLayout layout, const uint32_t num_elements, const uint32_t input_width, const uint32_t output_width, const T* in, float* out) {
@@ -68,6 +74,9 @@ void trim_and_cast_from(cudaStream_t stream, const MatrixLayout layout, const ui
 
 template void trim_and_cast_from(cudaStream_t stream, const MatrixLayout layout, const uint32_t num_elements, const uint32_t input_width, const uint32_t output_width, const float* in, float* out);
 template void trim_and_cast_from(cudaStream_t stream, const MatrixLayout layout, const uint32_t num_elements, const uint32_t input_width, const uint32_t output_width, const __half* in, float* out);
+#if TCNN_HAS_CUDA_BF16
+template void trim_and_cast_from(cudaStream_t stream, const MatrixLayout layout, const uint32_t num_elements, const uint32_t input_width, const uint32_t output_width, const __nv_bfloat16* in, float* out);
+#endif
 
 std::unique_ptr<CudaRtcKernel> generate_kernel(
 	const std::string& kernel_name,

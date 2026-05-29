@@ -147,6 +147,9 @@ Encoding<T>* create_encoding(uint32_t n_dims_to_encode, const json& encoding, ui
 #if TCNN_HALF_PRECISION
 template Encoding<__half>* create_encoding(uint32_t n_dims_to_encode, const json& encoding, uint32_t alignment);
 #endif
+#if TCNN_HAS_CUDA_BF16
+template Encoding<__nv_bfloat16>* create_encoding(uint32_t n_dims_to_encode, const json& encoding, uint32_t alignment);
+#endif
 template Encoding<float>* create_encoding(uint32_t n_dims_to_encode, const json& encoding, uint32_t alignment);
 
 std::vector<std::string> builtin_encodings() {
